@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-artifacts
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  labels:
+    app: mlflow
+  annotations:
+    # Roll out automatically whenever a new build pushes mlflow:latest
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"mlflow:latest"},
+        "fieldPath":"spec.template.spec.containers[?(@.name==\"mlflow\")].image"},
+       {"from":{"kind":"ImageStreamTag","name":"mlflow:latest"},
+        "fieldPath":"spec.template.spec.initContainers[?(@.name==\"db-upgrade\")].image"}]
+spec:
+  replicas: 1
+  strategy:
+    # Artifacts PVC is RWO
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      initContainers:
+        # Apply any new Alembic migrations the branch has picked up since the last rollout
+        - name: db-upgrade
+          image: mlflow:latest
+          command: [sh, -c, 'mlflow db upgrade "$MLFLOW_BACKEND_STORE_URI"']
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              valueFrom:
+                secretKeyRef: {name: mlflow-server, key: backend-store-uri}
+      containers:
+        - name: mlflow
+          image: mlflow:latest
+          command:
+            - mlflow
+            - server
+            - --host=0.0.0.0
+            - --port=5000
+            - --app-name=basic-auth
+            - --serve-artifacts
+            - --artifacts-destination=/mlflow/artifacts
+          ports:
+            - containerPort: 5000
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              valueFrom:
+                secretKeyRef: {name: mlflow-server, key: backend-store-uri}
+            - name: MLFLOW_AUTH_CONFIG_PATH
+              value: /etc/mlflow-auth/basic_auth.ini
+            - name: MLFLOW_AUTH_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: mlflow-server, key: admin-password}
+            - name: MLFLOW_FLASK_SERVER_SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: mlflow-server, key: flask-secret-key}
+            - name: MLFLOW_SERVER_ALLOWED_HOSTS
+              valueFrom:
+                configMapKeyRef: {name: mlflow-config, key: allowed-hosts}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+              httpHeaders:
+                - {name: Host, value: localhost}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {memory: 4Gi}
+          volumeMounts:
+            - name: artifacts
+              mountPath: /mlflow/artifacts
+            - name: auth-config
+              mountPath: /etc/mlflow-auth
+              readOnly: true
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: mlflow-artifacts
+        - name: auth-config
+          secret:
+            secretName: mlflow-auth-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+    - port: 5000
+      targetPort: 5000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mlflow
+spec:
+  to:
+    kind: Service
+    name: mlflow
+  port:
+    targetPort: 5000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

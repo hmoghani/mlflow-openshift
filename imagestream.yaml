@@ -1,0 +1,8 @@
+# Receives images pushed by `mlflow-openshift.sh build`; lookupPolicy lets the Deployment use "mlflow:latest".
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: mlflow
+spec:
+  lookupPolicy:
+    local: true
