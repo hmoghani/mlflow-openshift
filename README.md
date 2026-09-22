@@ -21,8 +21,8 @@ build:    clone branch tip -> build linux/amd64 image locally -> push to registr
       ImageStream updated -> Deployment rolls out -> db upgrade -> server starts
 ```
 
-After a merge to the branch, anyone with push access runs `./mlflow-openshift.sh build`. It
-always builds the **current tip of the branch**, not your local checkout, so push/merge first.
+After a merge to the branch, anyone logged in to the cluster runs `./mlflow-openshift.sh build`.
+It always builds the **current tip of the branch**, not your local checkout, so push/merge first.
 
 ## Prerequisites
 
@@ -37,45 +37,44 @@ stay reasonably fast.
 
 ## Configuration
 
-All settings come from environment variables, or from a `.env` file in this directory (shell
-variables win). Start from the template:
+None needed for day-to-day use. The script uses your current `oc login`, discovers the image
+registry from the cluster, and reads the branch to build from a `mlflow-build` ConfigMap that
+`deploy` writes. Everyone building into the namespace therefore builds the same branch.
+
+`build` prints which cluster it's using and stops if that cluster has no `mlflow-build`
+ConfigMap in the namespace, so it won't build into a cluster that wasn't set up with `deploy`.
+
+Optional overrides come from environment variables, or a `.env` file in this directory (shell
+variables win; see `.env.example`):
+
+| Variable | Description |
+|---|---|
+| `OPENSHIFT_API_URL` | Refuse to run unless the current context points at this API URL |
+| `KUBE_CONTEXT` | kube context to use (default: your current context) |
+| `NAMESPACE` | Namespace of the deployment (default `mlflow`) |
+| `MLFLOW_BRANCH` | Branch to build; with `deploy`, sets it for everyone |
+| `MLFLOW_GIT_REPO` | Repo to build from (default `https://github.com/mlflow/mlflow.git`) |
+| `OPENSHIFT_REGISTRY` | External host of the image registry route (default: discovered) |
+| `CONTAINER_ENGINE` | `podman` (default) or `docker` |
+
+`.env` is gitignored; don't commit cluster details. Run `./mlflow-openshift.sh help` for a usage
+summary.
+
+## First-time setup (once)
 
 ```bash
-cp .env.example .env   # then fill in the values
-```
-
-| Variable | Required by | Description |
-|---|---|---|
-| `OPENSHIFT_API_URL` | `deploy`, `build` | Cluster API URL, as printed by `oc whoami --show-server` |
-| `OPENSHIFT_REGISTRY` | `build` | External host of the internal registry route |
-| `MLFLOW_BRANCH` | `build` | Branch to build |
-| `NAMESPACE` | optional | Target namespace (default `mlflow`) |
-| `KUBE_CONTEXT` | optional | kube context to use (default: your current context) |
-| `MLFLOW_GIT_REPO` | optional | Repo to build from (default `https://github.com/mlflow/mlflow.git`) |
-| `CONTAINER_ENGINE` | optional | `podman` (default) or `docker` |
-
-Both subcommands check that the kube context points at `OPENSHIFT_API_URL` and stop otherwise,
-so a context switch in another terminal can't send a deploy to the wrong cluster.
-
-Run `./mlflow-openshift.sh help` for a usage summary.
-
-`.env` is gitignored; don't commit cluster details.
-
-## First-time setup (cluster admin, once)
-
-```bash
-./mlflow-openshift.sh deploy   # namespace, secrets, Postgres, MLflow Deployment/Service/Route
-./mlflow-openshift.sh build    # first image; the Deployment starts once it lands
+oc login <cluster-api-url>
+MLFLOW_BRANCH=<branch> ./mlflow-openshift.sh deploy   # namespace, secrets, Postgres, MLflow
+./mlflow-openshift.sh build                           # first image; the server starts once it lands
 ```
 
 Secrets (DB password, admin password, Flask secret key) are generated randomly into the cluster
 and never written to disk. Re-running `deploy` is safe and doesn't rotate them.
 
-Grant each person (or a group) permission to push images:
+`build` needs the image registry's external route. If it reports none, enable it once with:
 
 ```bash
-oc -n mlflow policy add-role-to-user system:image-builder <username>
-oc -n mlflow policy add-role-to-group system:image-builder <group>
+oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
 ```
 
 ## Shipping a new merge
@@ -85,14 +84,25 @@ oc -n mlflow policy add-role-to-group system:image-builder <group>
 oc -n mlflow rollout status deploy/mlflow
 ```
 
+## Switching branches
+
+For everyone (updates the `mlflow-build` ConfigMap):
+
+```bash
+MLFLOW_BRANCH=<other-branch> ./mlflow-openshift.sh deploy
+./mlflow-openshift.sh build
+```
+
+For a single build only: `MLFLOW_BRANCH=<other-branch> ./mlflow-openshift.sh build`. The next
+plain `build` goes back to the stored branch.
+
+Migrations are forward-only: switching to a branch with an older schema fails at startup.
+
 Images are tagged with the commit SHA as well as `latest`, so you can always tell what's running:
 
 ```bash
 oc -n mlflow get istag -o custom-columns=TAG:.metadata.name,CREATED:.metadata.creationTimestamp
 ```
-
-To try a different branch: `MLFLOW_BRANCH=<other-branch> ./mlflow-openshift.sh build`. Note that
-migrations are forward-only; switching back to a branch with an older schema will fail at startup.
 
 ## Using the server
 
@@ -116,9 +126,10 @@ Create per-person users instead of sharing `admin`; see the
 
 | Symptom | Fix |
 |---|---|
+| `no MLflow deployment in namespace ...` | Wrong cluster: check the printed `Cluster:` line and `oc login` to the right one |
 | `context ... points at ..., not OPENSHIFT_API_URL` | `oc login <OPENSHIFT_API_URL>` or set `KUBE_CONTEXT` |
 | `no session token` | Log in with `oc login` using a password or token |
-| `you can't push to namespace` | Ask an admin for `system:image-builder` (see above) |
+| `the image registry has no external route` | Enable it (see First-time setup) |
 | UI build killed / `JavaScript heap out of memory` | Give the podman/Docker VM 10 GB+ |
 | Pod stuck in `Init` after a push | `oc -n mlflow logs deploy/mlflow -c db-upgrade` (migration failed) |
 | `toomanyrequests` pulling base images | Already avoided: base images come from `public.ecr.aws` |
@@ -130,4 +141,4 @@ Create per-person users instead of sharing `admin`; see the
 | `mlflow-openshift.sh` | `deploy`: one-time setup of namespace, secrets, and manifests; `build`: build the image locally and push it |
 | `Dockerfile` | Two stages: UI build (native), MLflow install (amd64) |
 | `imagestream.yaml`, `postgres.yaml`, `mlflow.yaml` | Cluster manifests |
-| `.env.example` | Configuration template |
+| `.env.example` | Optional overrides |

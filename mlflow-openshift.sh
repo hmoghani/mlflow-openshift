@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Runs an MLflow server on OpenShift, built from a branch of mlflow/mlflow. See README.md.
 #
-#   ./mlflow-openshift.sh deploy   One-time (admin): namespace, secrets, Postgres, MLflow
-#   ./mlflow-openshift.sh build    After a merge: build the branch tip locally and push it
+#   MLFLOW_BRANCH=<branch> ./mlflow-openshift.sh deploy   One-time setup (or switch branch)
+#   ./mlflow-openshift.sh build                           After a merge: build and roll out
 #
-# Configuration comes from the environment, falling back to a .env file next to this script
-# (see .env.example). Variables already set in the environment win over .env.
+# Uses your current `oc login`. The branch to build is stored on the cluster by `deploy`, so
+# `build` needs no configuration. Optional overrides come from the environment, falling back to
+# a .env file next to this script (see .env.example).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -30,25 +31,35 @@ load_env() {
 # Strips the default HTTPS port and any trailing slash so URLs compare reliably.
 normalize_url() { local u=${1%/}; echo "${u%:443}"; }
 
-# Pins the kube context and verifies it points at OPENSHIFT_API_URL, so a context switch in
-# another terminal can't send us to the wrong cluster.
+# Pins the kube context for the whole run, so a context switch in another terminal can't
+# redirect us mid-run. If OPENSHIFT_API_URL is set, also require the context to point at it.
 connect() {
-  : "${OPENSHIFT_API_URL:?set OPENSHIFT_API_URL (e.g. https://api.<cluster-domain>:443); see .env.example}"
   NAMESPACE=${NAMESPACE:-mlflow}
   KUBE_CONTEXT=${KUBE_CONTEXT:-$(command oc config current-context 2>/dev/null)} \
-    || die "no current kube context; run 'oc login' or set KUBE_CONTEXT"
+    || die "no current kube context; run 'oc login <cluster-api-url>' first"
 
   local actual
   actual=$(oc whoami --show-server 2>/dev/null) \
-    || die "can't reach the cluster with context '$KUBE_CONTEXT'; run 'oc login $OPENSHIFT_API_URL'"
-  [ "$(normalize_url "$actual")" = "$(normalize_url "$OPENSHIFT_API_URL")" ] \
-    || die "context '$KUBE_CONTEXT' points at $actual, not OPENSHIFT_API_URL=$OPENSHIFT_API_URL. Run 'oc login $OPENSHIFT_API_URL' or set KUBE_CONTEXT."
+    || die "can't reach the cluster with context '$KUBE_CONTEXT'; run 'oc login <cluster-api-url>'"
+  if [ -n "${OPENSHIFT_API_URL:-}" ] \
+    && [ "$(normalize_url "$actual")" != "$(normalize_url "$OPENSHIFT_API_URL")" ]; then
+    die "context '$KUBE_CONTEXT' points at $actual, not OPENSHIFT_API_URL=$OPENSHIFT_API_URL"
+  fi
+  echo "Cluster: $actual (namespace $NAMESPACE)"
 }
 
 oc() { command oc --context "$KUBE_CONTEXT" -n "${NAMESPACE:-mlflow}" "$@"; }
 
+# Reads a key from the mlflow-build ConfigMap that `deploy` writes.
+build_setting() { oc get configmap mlflow-build -o jsonpath="{.data.$1}" 2>/dev/null; }
+
 cmd_deploy() {
   connect
+  local branch=${MLFLOW_BRANCH:-$(build_setting branch)}
+  local repo=${MLFLOW_GIT_REPO:-$(build_setting git-repo)}
+  repo=${repo:-https://github.com/mlflow/mlflow.git}
+  [ -n "$branch" ] || die "set MLFLOW_BRANCH to the branch to deploy, e.g. MLFLOW_BRANCH=<branch> $0 deploy"
+
   command oc --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1 \
     || command oc --context "$KUBE_CONTEXT" create namespace "$NAMESPACE" >/dev/null
 
@@ -86,27 +97,40 @@ EOF
     --from-literal=allowed-hosts="$host,mlflow,mlflow:5000,$svc,$svc:5000,$svc.cluster.local,$svc.cluster.local:5000,localhost,localhost:*" \
     --dry-run=client -o yaml | oc apply -f -
 
+  # What `build` builds; shared by everyone who deploys to this namespace.
+  oc create configmap mlflow-build --from-literal=branch="$branch" --from-literal=git-repo="$repo" \
+    --dry-run=client -o yaml | oc apply -f -
+
   echo "Route: https://$host"
+  echo "Tracking branch: $branch ($repo)"
   echo "Admin password: oc -n $NAMESPACE get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d"
-  echo "Next: ./mlflow-openshift.sh build"
+  echo "Next: $0 build"
 }
 
 # Builds on this machine, never on the cluster: the UI build needs ~8 GB of heap. The push
 # updates the mlflow ImageStream, whose trigger rolls out the Deployment (its db-upgrade init
 # container applies new migrations first).
 cmd_build() {
-  : "${OPENSHIFT_REGISTRY:?set OPENSHIFT_REGISTRY (e.g. default-route-openshift-image-registry.apps.<cluster-domain>); see .env.example}"
-  : "${MLFLOW_BRANCH:?set MLFLOW_BRANCH to the branch to build; see .env.example}"
-  local repo=${MLFLOW_GIT_REPO:-https://github.com/mlflow/mlflow.git}
   local engine=${CONTAINER_ENGINE:-podman}
-  local src=src token sha image mem
+  local src=src branch repo registry token sha image mem
   connect
+
+  # Doubles as the wrong-cluster check: only a cluster set up by `deploy` has this ConfigMap.
+  oc get configmap mlflow-build >/dev/null 2>&1 \
+    || die "no MLflow deployment in namespace $NAMESPACE on this cluster; wrong cluster, or run '$0 deploy' first"
+  branch=${MLFLOW_BRANCH:-$(build_setting branch)}
+  repo=${MLFLOW_GIT_REPO:-$(build_setting git-repo)}
+  [ -n "$branch" ] && [ -n "$repo" ] || die "mlflow-build ConfigMap is incomplete; re-run '$0 deploy'"
+
+  registry=${OPENSHIFT_REGISTRY:-$(command oc --context "$KUBE_CONTEXT" -n openshift-image-registry \
+    get route default-route -o jsonpath='{.spec.host}' 2>/dev/null)} || true
+  [ -n "$registry" ] || die "the image registry has no external route; enable it with: oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{\"spec\":{\"defaultRoute\":true}}'"
 
   command -v "$engine" >/dev/null || die "$engine not found (set CONTAINER_ENGINE=docker to use Docker)"
   token=$(oc whoami -t 2>/dev/null) \
     || die "no session token; log in with 'oc login' (username/password or token), not a certificate kubeconfig"
   [ "$(oc auth can-i update imagestreams/layers)" = yes ] \
-    || die "you can't push to namespace $NAMESPACE; ask an admin to run: oc -n $NAMESPACE policy add-role-to-user system:image-builder $(oc whoami)"
+    || die "you can't push images to namespace $NAMESPACE"
 
   if [ "$engine" = podman ] && [ "$(uname)" = Darwin ]; then
     mem=$(podman machine inspect --format '{{.Resources.Memory}}' 2>/dev/null | head -1 || true)
@@ -117,23 +141,24 @@ cmd_build() {
   fi
 
   if [ ! -d "$src/.git" ]; then
-    git clone --depth 1 --branch "$MLFLOW_BRANCH" "$repo" "$src"
+    git clone --depth 1 --branch "$branch" "$repo" "$src"
   else
     git -C "$src" remote set-url origin "$repo"
-    git -C "$src" fetch --depth 1 origin "$MLFLOW_BRANCH"
+    git -C "$src" fetch --depth 1 origin "$branch"
     git -C "$src" reset --hard FETCH_HEAD
     git -C "$src" clean -fdx
   fi
   sha=$(git -C "$src" rev-parse --short HEAD)
-  image=$OPENSHIFT_REGISTRY/$NAMESPACE/mlflow
-  echo "Building $MLFLOW_BRANCH @ $sha -> $image"
+  image=$registry/$NAMESPACE/mlflow
+  echo "Building $branch @ $sha"
 
   "$engine" build --platform linux/amd64 -f Dockerfile -t "$image:$sha" -t "$image:latest" "$src"
 
-  echo "$token" | "$engine" login --username "$(oc whoami)" --password-stdin "$OPENSHIFT_REGISTRY"
+  echo "$token" | "$engine" login --username "$(oc whoami)" --password-stdin "$registry"
   "$engine" push "$image:$sha"
   "$engine" push "$image:latest"
-  echo "Pushed $image:$sha (and :latest); the Deployment rolls out automatically."
+  echo "Pushed $branch @ $sha; the Deployment rolls out automatically."
+  echo "Watch it: oc -n $NAMESPACE rollout status deploy/mlflow"
 }
 
 load_env
