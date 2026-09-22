@@ -3,6 +3,7 @@
 #
 #   MLFLOW_BRANCH=<branch> ./mlflow-openshift.sh deploy   One-time setup (or switch branch)
 #   ./mlflow-openshift.sh build                           After a merge: build and roll out
+#   Set NAMESPACE=<name> on both to use your own namespace (default: mlflow).
 #
 # Uses your current `oc login`. The branch to build is stored on the cluster by `deploy`, so
 # `build` needs no configuration. Optional overrides come from the environment, falling back to
@@ -13,7 +14,7 @@ cd "$(dirname "$0")"
 die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,5s/^# \{0,1\}//p' "$0"
+  sed -n '2,6s/^# \{0,1\}//p' "$0"
   exit "${1:-0}"
 }
 
@@ -104,7 +105,11 @@ EOF
   echo "Route: https://$host"
   echo "Tracking branch: $branch ($repo)"
   echo "Admin password: oc -n $NAMESPACE get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d"
-  echo "Next: $0 build"
+  if [ "$NAMESPACE" = mlflow ]; then
+    echo "Next: $0 build"
+  else
+    echo "Next: NAMESPACE=$NAMESPACE $0 build   (or put NAMESPACE=$NAMESPACE in .env)"
+  fi
 }
 
 # Builds on this machine, never on the cluster: the UI build needs ~8 GB of heap. The push

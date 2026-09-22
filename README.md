@@ -81,7 +81,13 @@ oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"
 
 ```bash
 ./mlflow-openshift.sh build
-oc -n mlflow rollout status deploy/mlflow
+oc -n ${NAMESPACE:-mlflow} rollout status deploy/mlflow
+```
+
+Images are tagged with the commit SHA as well as `latest`, so you can always tell what's running:
+
+```bash
+oc -n ${NAMESPACE:-mlflow} get istag -o custom-columns=TAG:.metadata.name,CREATED:.metadata.creationTimestamp
 ```
 
 ## Switching branches
@@ -98,17 +104,27 @@ plain `build` goes back to the stored branch.
 
 Migrations are forward-only: switching to a branch with an older schema fails at startup.
 
-Images are tagged with the commit SHA as well as `latest`, so you can always tell what's running:
+## Your own namespace
+
+To test a different branch without touching the shared deployment, deploy a separate instance
+into your own namespace. It gets its own database, admin password, branch setting, and Route
+(`mlflow-<namespace>.apps...`):
 
 ```bash
-oc -n mlflow get istag -o custom-columns=TAG:.metadata.name,CREATED:.metadata.creationTimestamp
+export NAMESPACE=mlflow-<you>
+MLFLOW_BRANCH=<branch> ./mlflow-openshift.sh deploy
+./mlflow-openshift.sh build
 ```
+
+`NAMESPACE` must be set for every command that targets it; put `NAMESPACE=mlflow-<you>` in `.env`
+to make it stick. The `oc` commands in this README use `${NAMESPACE:-mlflow}`, so they follow the
+same variable. Remove the instance with `oc delete namespace mlflow-<you>` (this deletes its data).
 
 ## Using the server
 
 ```bash
-HOST=$(oc -n mlflow get route mlflow -o jsonpath='{.spec.host}')
-PW=$(oc -n mlflow get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d)
+HOST=$(oc -n ${NAMESPACE:-mlflow} get route mlflow -o jsonpath='{.spec.host}')
+PW=$(oc -n ${NAMESPACE:-mlflow} get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d)
 ```
 
 - **UI:** `https://$HOST`, user `admin`
@@ -126,12 +142,12 @@ Create per-person users instead of sharing `admin`; see the
 
 | Symptom | Fix |
 |---|---|
-| `no MLflow deployment in namespace ...` | Wrong cluster: check the printed `Cluster:` line and `oc login` to the right one |
+| `no MLflow deployment in namespace ...` | Wrong cluster or namespace: check the printed `Cluster:` line, `oc login` to the right one, and check `NAMESPACE` |
 | `context ... points at ..., not OPENSHIFT_API_URL` | `oc login <OPENSHIFT_API_URL>` or set `KUBE_CONTEXT` |
 | `no session token` | Log in with `oc login` using a password or token |
 | `the image registry has no external route` | Enable it (see First-time setup) |
 | UI build killed / `JavaScript heap out of memory` | Give the podman/Docker VM 10 GB+ |
-| Pod stuck in `Init` after a push | `oc -n mlflow logs deploy/mlflow -c db-upgrade` (migration failed) |
+| Pod stuck in `Init` after a push | `oc -n ${NAMESPACE:-mlflow} logs deploy/mlflow -c db-upgrade` (migration failed) |
 | `toomanyrequests` pulling base images | Already avoided: base images come from `public.ecr.aws` |
 
 ## Files
