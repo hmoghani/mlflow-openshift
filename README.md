@@ -21,22 +21,22 @@ export NAMESPACE=mlflow         # optional; mlflow is the default
 
 # 4. Build the branch on your machine and roll it out (takes a while the first time)
 ./mlflow-openshift.sh build
-oc -n $NAMESPACE rollout status deploy/mlflow
+oc -n ${NAMESPACE:-mlflow} rollout status deploy/mlflow
 ```
 
 Then open it:
 
 ```bash
-echo "https://$(oc -n $NAMESPACE get route mlflow -o jsonpath='{.spec.host}')"
-oc -n $NAMESPACE get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d; echo
+echo "https://$(oc -n ${NAMESPACE:-mlflow} get route mlflow -o jsonpath='{.spec.host}')"
+oc -n ${NAMESPACE:-mlflow} get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d; echo
 ```
 
 Log in to the UI as `admin` with that password. For the Python client:
 
 ```bash
-export MLFLOW_TRACKING_URI=https://$(oc -n $NAMESPACE get route mlflow -o jsonpath='{.spec.host}')
+export MLFLOW_TRACKING_URI=https://$(oc -n ${NAMESPACE:-mlflow} get route mlflow -o jsonpath='{.spec.host}')
 export MLFLOW_TRACKING_USERNAME=admin
-export MLFLOW_TRACKING_PASSWORD=$(oc -n $NAMESPACE get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d)
+export MLFLOW_TRACKING_PASSWORD=$(oc -n ${NAMESPACE:-mlflow} get secret mlflow-server -o jsonpath='{.data.admin-password}' | base64 -d)
 ```
 
 ## After a merge
@@ -115,7 +115,7 @@ build:  clone branch tip -> build linux/amd64 image locally -> push to cluster r
   memory, which can starve a shared node. On Apple Silicon the UI compiles natively and only the
   Python install runs as amd64.
 - **Images** are tagged with the commit SHA and `latest`. See what's deployed with
-  `oc -n $NAMESPACE get istag`.
+  `oc -n ${NAMESPACE:-mlflow} get istag`.
 - **Secrets** (database password, admin password, Flask secret key) are generated into the cluster
   by `deploy` and never written to disk. Re-running `deploy` doesn't rotate them.
 
@@ -139,7 +139,7 @@ build:  clone branch tip -> build linux/amd64 image locally -> push to cluster r
 | `no session token` | Log in with `oc login` using a password or token |
 | `the image registry has no external route` | Enable it (see [Prerequisites](#prerequisites)) |
 | UI build killed / `JavaScript heap out of memory` | Give the podman/Docker VM 10 GB+ |
-| Pod stuck in `Init` after a build | `oc -n $NAMESPACE logs deploy/mlflow -c db-upgrade` (migration failed) |
+| Pod stuck in `Init` after a build | `oc -n ${NAMESPACE:-mlflow} logs deploy/mlflow -c db-upgrade` (migration failed) |
 
 For more users than the shared `admin`, see the
 [MLflow auth docs](https://mlflow.org/docs/latest/self-hosting/security/basic-http-auth/).
