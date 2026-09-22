@@ -53,6 +53,15 @@ Set `NAMESPACE` if the deployment isn't in `mlflow`.
 
 Joining an existing deployment? Skip step 3; `oc login` and `build` are all you need.
 
+To check what's running:
+
+```bash
+oc -n ${NAMESPACE:-mlflow} exec deploy/mlflow -- env | grep MLFLOW_BUILD
+# MLFLOW_BUILD_BRANCH=<branch>
+# MLFLOW_BUILD_COMMIT=<full commit SHA>
+# MLFLOW_BUILD_REPO=https://github.com/mlflow/mlflow.git
+```
+
 ## Variables
 
 All optional except `MLFLOW_BRANCH` on the first `deploy`. Set them with `export`, or put them in
@@ -114,8 +123,10 @@ build:  clone branch tip -> build linux/amd64 image locally -> push to cluster r
 - **Builds run on your machine, never on the cluster.** The MLflow UI build needs about 8 GB of
   memory, which can starve a shared node. On Apple Silicon the UI compiles natively and only the
   Python install runs as amd64.
-- **Images** are tagged with the commit SHA and `latest`. See what's deployed with
-  `oc -n ${NAMESPACE:-mlflow} get istag`.
+- **Images** are tagged with the short commit SHA and `latest`, and record their repo, branch,
+  and commit as `MLFLOW_BUILD_*` environment variables and OCI labels
+  (`org.opencontainers.image.source`, `org.opencontainers.image.revision`,
+  `mlflow-openshift.branch`). List past builds with `oc -n ${NAMESPACE:-mlflow} get istag`.
 - **Secrets** (database password, admin password, Flask secret key) are generated into the cluster
   by `deploy` and never written to disk. Re-running `deploy` doesn't rotate them.
 

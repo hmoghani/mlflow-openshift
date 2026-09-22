@@ -157,7 +157,11 @@ cmd_build() {
   image=$registry/$NAMESPACE/mlflow
   echo "Building $branch @ $sha"
 
-  "$engine" build --platform linux/amd64 -f Dockerfile -t "$image:$sha" -t "$image:latest" "$src"
+  "$engine" build --platform linux/amd64 -f Dockerfile \
+    --build-arg MLFLOW_BUILD_REPO="$repo" \
+    --build-arg MLFLOW_BUILD_BRANCH="$branch" \
+    --build-arg MLFLOW_BUILD_COMMIT="$(git -C "$src" rev-parse HEAD)" \
+    -t "$image:$sha" -t "$image:latest" "$src"
 
   echo "$token" | "$engine" login --username "$(oc whoami)" --password-stdin "$registry"
   "$engine" push "$image:$sha"
