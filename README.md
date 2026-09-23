@@ -53,7 +53,28 @@ Set `NAMESPACE` if the deployment isn't in `mlflow`.
 
 Joining an existing deployment? Skip step 3; `oc login` and `build` are all you need.
 
-To check what's running:
+## Building your local changes
+
+To try work that isn't pushed yet, build straight from your local mlflow checkout, uncommitted
+changes included:
+
+```bash
+./mlflow-openshift.sh build --local ~/git/mlflow
+```
+
+The image gets exactly what git sees in that checkout: tracked files with your edits, plus new
+untracked files. Anything gitignored (`node_modules`, `.venv`, build outputs) is left out, and the
+checkout itself isn't modified. Git submodules such as `mlflow/assistant/skills` (the MLflow
+Assistant's built-in skills) are included; if your checkout hasn't initialized one, the script
+fetches the commit it records. The image is tagged `local-<sha>` (`local-<sha>-dirty` with
+uncommitted changes), and the branch stored on the cluster doesn't change: the next plain `build`
+goes back to it.
+
+This replaces the running server for everyone in the namespace. If your changes add database
+migrations, use your own namespace (see [below](#your-own-namespace)): once a migration is
+applied, the shared branch can't start against that database anymore.
+
+## Checking what's running
 
 ```bash
 oc -n ${NAMESPACE:-mlflow} exec deploy/mlflow -- env | grep MLFLOW_BUILD
@@ -61,6 +82,9 @@ oc -n ${NAMESPACE:-mlflow} exec deploy/mlflow -- env | grep MLFLOW_BUILD
 # MLFLOW_BUILD_COMMIT=<full commit SHA>
 # MLFLOW_BUILD_REPO=https://github.com/mlflow/mlflow.git
 ```
+
+A `--local` build shows `MLFLOW_BUILD_REPO=local:<origin-url>`, and its commit ends in `-dirty` if
+it included uncommitted changes.
 
 ## Variables
 
@@ -72,6 +96,7 @@ a `.env` file next to the script (see `.env.example`); exported variables win ov
 | `MLFLOW_BRANCH` | stored on the cluster | Branch to build. With `deploy`, sets it for everyone; with `build`, only for that build |
 | `NAMESPACE` | `mlflow` | Namespace of the deployment |
 | `MLFLOW_GIT_REPO` | `https://github.com/mlflow/mlflow.git` | Repo to build from, e.g. your fork |
+| `MLFLOW_LOCAL_PATH` | not set | Build this local checkout instead, like `build --local <path>` |
 | `KUBE_CONTEXT` | your current context | kube context to use |
 | `OPENSHIFT_API_URL` | not set | If set, refuse to run unless the context points at this API URL |
 | `OPENSHIFT_REGISTRY` | discovered from the cluster | External host of the image registry route |
