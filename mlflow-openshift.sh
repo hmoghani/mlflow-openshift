@@ -100,6 +100,7 @@ EOF
   svc=mlflow.$NAMESPACE.svc
   oc create configmap mlflow-config \
     --from-literal=allowed-hosts="$host,mlflow,mlflow:5000,$svc,$svc:5000,$svc.cluster.local,$svc.cluster.local:5000,localhost,localhost:*" \
+    --from-literal=cors-allowed-origins="https://$host" \
     --dry-run=client -o yaml | oc apply -f -
 
   # What `build` builds; shared by everyone who deploys to this namespace.
